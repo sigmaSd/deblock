@@ -1,12 +1,13 @@
 import { parseArgs } from "@std/cli/parse-args";
+import * as path from "@std/path";
+import { expandGlob } from "@std/fs/expand-glob";
+import { bold, cyan, gray, green, magenta, red, yellow } from "@std/fmt/colors";
 import {
   type CallExpression,
   type FunctionLikeDeclaration,
   Project,
   SyntaxKind,
-} from "npm:ts-morph";
-import * as path from "@std/path";
-import { expandGlob } from "@std/fs/expand-glob";
+} from "ts-morph";
 
 const parsed = parseArgs(Deno.args, {
   boolean: ["help"],
@@ -18,11 +19,11 @@ const parsed = parseArgs(Deno.args, {
 
 if (parsed.help) {
   console.log(`
-Usage: deno run -A check-blocking.ts [options] [<files...>]
+${bold("Usage:")} deno run -A check-blocking.ts [options] [<files...>]
 
 Looks for blocking Deno APIs inside asynchronous functions.
 
-Options:
+${bold("Options:")}
   -e, --exclude <pattern>    Exclude files matching the glob pattern.
   -h, --help                 Show this help message.
   `);
@@ -50,11 +51,11 @@ async function getFiles() {
 const project = new Project();
 const files = await getFiles();
 if (files.length === 0) {
-  console.log("No files found to check.");
+  console.log(yellow("No files found to check."));
   Deno.exit(0);
 }
 
-console.log(`Analyzing ${files.length} files...`);
+console.log(gray(`Analyzing ${files.length} files...`));
 for (const file of files) {
   project.addSourceFileAtPath(file);
 }
@@ -207,17 +208,23 @@ function report(
   const sourceFile = func.getSourceFile();
   const lineChar = sourceFile.getLineAndColumnAtPos(call.getStart());
   const funcName = getFunctionName(func);
-  console.log(`[BLOCKING ERROR] In async function '${funcName}':`);
+
   console.log(
-    `  Location: ${sourceFile.getFilePath()}:${lineChar.line}:${lineChar.column}`,
+    `${red(bold("ERROR"))} ${
+      cyan(
+        `${sourceFile.getFilePath()}:${lineChar.line}:${lineChar.column}`,
+      )
+    }`,
   );
-  console.log(`  Call: ${call.getText()}`);
-  console.log(`  Reason: calls blocking API: ${reason}
-`);
+  console.log(`  In async function: ${yellow(funcName)}`);
+  console.log(`  Blocking call:     ${red(call.getText())}`);
+  console.log(`  Reason:            ${magenta(reason)}`);
+  console.log("");
 }
 
 if (!foundIssues) {
-  console.log("No blocking calls found in async functions.");
+  console.log(green(bold("✔ No blocking calls found in async functions.")));
 } else {
+  console.log(red(bold("\n✖ Found blocking calls in async functions.")));
   Deno.exit(1);
 }
