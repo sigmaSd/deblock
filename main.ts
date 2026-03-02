@@ -5,6 +5,7 @@ import { bold, cyan, gray, green, magenta, red, yellow } from "@std/fmt/colors";
 import {
   type CallExpression,
   type FunctionLikeDeclaration,
+  Node,
   Project,
   SyntaxKind,
 } from "ts-morph";
@@ -60,7 +61,7 @@ for (const file of files) {
   project.addSourceFileAtPath(file);
 }
 
-const allFunctions: FunctionLikeDeclaration[] = [];
+const allFunctions: (Node & FunctionLikeDeclaration)[] = [];
 for (const sourceFile of project.getSourceFiles()) {
   allFunctions.push(
     ...sourceFile.getDescendantsOfKind(SyntaxKind.FunctionDeclaration),
@@ -79,14 +80,13 @@ for (const sourceFile of project.getSourceFiles()) {
   allFunctions.push(...sourceFile.getDescendantsOfKind(SyntaxKind.SetAccessor));
 }
 
-function getFunctionName(func: FunctionLikeDeclaration): string {
-  if (func.isKind(SyntaxKind.Constructor)) return "constructor";
-  if (func.isKind(SyntaxKind.GetAccessor)) return `get ${func.getName()}`;
-  if (func.isKind(SyntaxKind.SetAccessor)) return `set ${func.getName()}`;
+function getFunctionName(func: Node & FunctionLikeDeclaration): string {
+  if (Node.isConstructorDeclaration(func)) return "constructor";
+  if (Node.isGetAccessorDeclaration(func)) return `get ${func.getName()}`;
+  if (Node.isSetAccessorDeclaration(func)) return `set ${func.getName()}`;
 
-  if ("getName" in func && typeof func.getName === "function") {
-    const name = (func as any).getName?.();
-    if (name) return name;
+  if (Node.isFunctionDeclaration(func) || Node.isMethodDeclaration(func)) {
+    return func.getName() ?? "anonymous function";
   }
 
   const variableDeclaration = func.getFirstAncestorByKind(
@@ -106,11 +106,8 @@ function getFunctionName(func: FunctionLikeDeclaration): string {
   return "anonymous function";
 }
 
-function isAsyncFunction(func: FunctionLikeDeclaration): boolean {
-  if ("isAsync" in func && typeof func.isAsync === "function") {
-    return (func as any).isAsync();
-  }
-  return false;
+function isAsyncFunction(func: Node & FunctionLikeDeclaration): boolean {
+  return Node.isAsyncable(func) && func.isAsync();
 }
 
 function isNativeSyncBlocker(call: CallExpression): string | null {
@@ -123,7 +120,7 @@ function isNativeSyncBlocker(call: CallExpression): string | null {
 }
 
 const blockingFunctions = new Map<
-  FunctionLikeDeclaration,
+  Node & FunctionLikeDeclaration,
   { reason: string; callText: string }
 >();
 
@@ -153,13 +150,15 @@ while (changed) {
       if (!symbol) continue;
       const declarations = symbol.getDeclarations();
       for (const decl of declarations) {
-        if (blockingFunctions.has(decl as FunctionLikeDeclaration)) {
-          blockingFunctions.set(func, {
-            reason: "calls_blocking_func",
-            callText: call.getExpression().getText(),
-          });
-          changed = true;
-          break;
+        if (Node.isFunctionLikeDeclaration(decl)) {
+          if (blockingFunctions.has(decl)) {
+            blockingFunctions.set(func, {
+              reason: "calls_blocking_func",
+              callText: call.getExpression().getText(),
+            });
+            changed = true;
+            break;
+          }
         }
       }
       if (changed) break;
@@ -185,15 +184,17 @@ for (const func of allFunctions) {
     if (symbol) {
       const declarations = symbol.getDeclarations();
       for (const decl of declarations) {
-        const blocker = blockingFunctions.get(decl as FunctionLikeDeclaration);
-        if (blocker) {
-          report(
-            func,
-            call,
-            `${call.getExpression().getText()} (which is blocking)`,
-          );
-          foundIssues = true;
-          break;
+        if (Node.isFunctionLikeDeclaration(decl)) {
+          const blocker = blockingFunctions.get(decl);
+          if (blocker) {
+            report(
+              func,
+              call,
+              `${call.getExpression().getText()} (which is blocking)`,
+            );
+            foundIssues = true;
+            break;
+          }
         }
       }
     }
@@ -201,7 +202,7 @@ for (const func of allFunctions) {
 }
 
 function report(
-  func: FunctionLikeDeclaration,
+  func: Node & FunctionLikeDeclaration,
   call: CallExpression,
   reason: string,
 ) {
