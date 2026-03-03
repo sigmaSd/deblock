@@ -17,8 +17,9 @@ It detects:
   from `node:fs`, `node:child_process`, `node:crypto`.
 - **Blocking JSR dependencies** — traces through JSR dependency source code to
   find transitive blocking calls (e.g. `walkSync` from `@std/fs` internally
-  calls `Deno.readDirSync`). Dependencies are resolved automatically from Deno's
-  global cache.
+  calls `Deno.readDirSync`). Works with both import-mapped deps from `deno.json`
+  and inline `jsr:` specifiers — dependencies are resolved automatically from
+  Deno's global cache.
 - **Propagation** — if a sync function calls a blocker, and that sync function
   is called from an async function, it's reported with the full root cause
   chain.
@@ -90,7 +91,16 @@ ERROR src/utils.ts:18:10
 JSR dependency detection works automatically. `deblock` runs `deno info --json`
 internally to resolve all dependencies to their cached source files (in Deno's
 global cache or a local `vendor/` directory). No special configuration is needed
-— just make sure your dependencies are listed in `deno.json`.
+— both import-mapped dependencies from `deno.json` and inline `jsr:` specifiers
+work out of the box:
+
+```ts
+// Works: import map entry in deno.json
+import { walkSync } from "@std/fs/walk";
+
+// Also works: inline jsr: specifier (no deno.json entry needed)
+import { loadSync } from "jsr:@std/dotenv@0";
+```
 
 ## How it works
 

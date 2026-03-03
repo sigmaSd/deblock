@@ -62,7 +62,7 @@ Deno.test("detects node: builtin sync calls in async functions", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// JSR dependency blocking calls (requires vendor)
+// JSR dependency blocking calls
 // ---------------------------------------------------------------------------
 
 Deno.test("detects blocking calls from JSR deps", async () => {
@@ -71,6 +71,13 @@ Deno.test("detects blocking calls from JSR deps", async () => {
   assert(stdout.includes("walkSync"), stdout);
   // Should show the root cause chain
   assert(stdout.includes("Deno.readDirSync"), stdout);
+});
+
+Deno.test("detects blocking calls from inline jsr: imports", async () => {
+  const { code, stdout } = await run("jsr_inline.ts");
+  assertEquals(code, 1);
+  assert(stdout.includes("loadSync"), stdout);
+  assert(stdout.includes("Deno.readTextFileSync"), stdout);
 });
 
 // ---------------------------------------------------------------------------
