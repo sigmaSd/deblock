@@ -3,6 +3,19 @@
 Find blocking (synchronous) calls inside `async` functions in your Deno &
 TypeScript projects.
 
+## Why async over sync?
+
+Synchronous calls are generally faster than their async counterparts — async
+operations may spawn another thread and involve extra scheduling overhead. That
+said, it's generally better to use async APIs so you don't block Deno's event
+loop. A single blocking call in an async function can stall every other
+concurrent task (HTTP requests, timers, streams, etc.) until it completes.
+
+Of course there are exceptions: short-lived scripts, CLI tools, or top-level
+setup code where concurrency doesn't matter are perfectly fine with sync calls.
+`deblock` focuses on the cases that typically _do_ matter — sync calls sitting
+inside `async` functions where they can silently degrade performance.
+
 ## What it does
 
 `deblock` uses [ts-morph](https://jsr.io/@ts-morph/ts-morph) to statically
