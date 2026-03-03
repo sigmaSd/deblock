@@ -1,9 +1,15 @@
 {
+  "name": "@sigmasd/deblock",
+  "version": "0.1.0",
+  "license": "MIT",
+  "exports": "./main.ts",
   "imports": {
+    "@std/assert": "jsr:@std/assert@^1.0.19",
     "@std/cli": "jsr:@std/cli@^1.0.28",
     "@std/fs": "jsr:@std/fs@^1.0.23",
     "@std/fmt": "jsr:@std/fmt@^1.0.2",
     "@std/path": "jsr:@std/path@^1.1.4",
     "ts-morph": "jsr:@ts-morph/ts-morph@^27.0.2"
-  }
+  },
+  "exclude": ["tests/fixtures"]
 }
