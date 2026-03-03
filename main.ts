@@ -51,154 +51,166 @@ async function getFiles() {
 }
 
 // ---------------------------------------------------------------------------
-// Vendor / JSR resolution
+// Dependency resolution via `deno info`
 // ---------------------------------------------------------------------------
 
-interface JsrPackageInfo {
-  /** Absolute path to the versioned directory */
-  versionDir: string;
-  /** Resolved version string, e.g. "1.1.4" */
-  version: string;
-  /** Exports map from <version>_meta.json, e.g. { "./join": "./join.ts" } */
-  exports: Record<string, string>;
+interface DenoInfoModule {
+  kind: string;
+  specifier: string;
+  local?: string;
+  mediaType?: string;
+  dependencies?: Array<{
+    specifier: string;
+    code?: { specifier: string };
+    type?: { specifier: string };
+  }>;
 }
 
-/** Scan vendor/jsr.io and build an index of every vendored JSR package. */
-async function buildVendorIndex(
-  vendorDir: string,
-): Promise<Map<string, JsrPackageInfo>> {
-  const index = new Map<string, JsrPackageInfo>();
-  const jsrDir = path.join(vendorDir, "jsr.io");
-
-  try {
-    for await (const scopeEntry of Deno.readDir(jsrDir)) {
-      if (!scopeEntry.isDirectory || !scopeEntry.name.startsWith("@")) continue;
-      const scopeDir = path.join(jsrDir, scopeEntry.name);
-
-      for await (const pkgEntry of Deno.readDir(scopeDir)) {
-        if (!pkgEntry.isDirectory) continue;
-        const pkgDir = path.join(scopeDir, pkgEntry.name);
-        const pkgName = `${scopeEntry.name}/${pkgEntry.name}`;
-
-        for await (const entry of Deno.readDir(pkgDir)) {
-          if (!entry.isDirectory) continue;
-          const version = entry.name;
-          const versionDir = path.join(pkgDir, version);
-          const metaPath = path.join(pkgDir, `${version}_meta.json`);
-
-          try {
-            const meta = JSON.parse(await Deno.readTextFile(metaPath));
-            index.set(pkgName, {
-              versionDir,
-              version,
-              exports: meta.exports ?? {},
-            });
-          } catch {
-            index.set(pkgName, { versionDir, version, exports: {} });
-          }
-        }
-      }
-    }
-  } catch {
-    // vendor directory missing or unreadable – not an error
-  }
-
-  return index;
-}
-
-/** Read the import map from deno.json. */
-async function loadImportMap(
-  projectDir: string,
-): Promise<Record<string, string>> {
-  try {
-    const raw = JSON.parse(
-      await Deno.readTextFile(path.join(projectDir, "deno.json")),
-    );
-    return raw.imports ?? {};
-  } catch {
-    return {};
-  }
-}
-
-/** Parse `jsr:@scope/name@version/subpath` into its parts. */
-function parseJsrSpecifier(
-  specifier: string,
-): { pkgName: string; subpath: string } | null {
-  const m = specifier.match(/^jsr:(@[^/]+\/[^@]+)@[^/]*(\/.*)?$/);
-  if (!m) return null;
-  return { pkgName: m[1], subpath: m[2] ?? "" };
-}
-
-/** Resolve a `jsr:` specifier to an absolute file path inside the vendor tree. */
-function resolveJsrToVendor(
-  specifier: string,
-  vendorIndex: Map<string, JsrPackageInfo>,
-): string | null {
-  const parsed = parseJsrSpecifier(specifier);
-  if (!parsed) return null;
-
-  const pkg = vendorIndex.get(parsed.pkgName);
-  if (!pkg) return null;
-
-  const exportKey = parsed.subpath ? `.${parsed.subpath}` : ".";
-  let resolved = pkg.exports[exportKey];
-
-  if (!resolved && parsed.subpath) {
-    // Fallback: direct file mapping (subpath → subpath.ts)
-    resolved = `.${parsed.subpath}.ts`;
-  }
-  if (!resolved) {
-    resolved = pkg.exports["."] ?? "./mod.ts";
-  }
-
-  return path.resolve(pkg.versionDir, resolved);
+interface DenoInfoOutput {
+  modules: DenoInfoModule[];
+  redirects: Record<string, string>;
 }
 
 /**
- * Main entry point for custom module resolution.
- * Handles bare specifiers via the deno.json import map and `jsr:` specifiers.
+ * Build dependency resolution maps by running `deno info --json`.
+ * Works with both Deno's global cache (DENO_DIR) and vendored deps.
+ * Also triggers caching of any uncached dependencies.
  */
-function resolveModuleSpecifier(
-  moduleName: string,
-  importMap: Record<string, string>,
-  vendorIndex: Map<string, JsrPackageInfo>,
-): string | null {
-  // Already a jsr: specifier (used by vendored deps internally)
-  if (moduleName.startsWith("jsr:")) {
-    return resolveJsrToVendor(moduleName, vendorIndex);
-  }
+async function buildResolutionFromDenoInfo(
+  projectDir: string,
+  files: string[],
+): Promise<{
+  /** local file path → Map of (raw import specifier → resolved local path) */
+  fileResolutions: Map<string, Map<string, string>>;
+  /** local cache path → canonical specifier (for pretty-printing) */
+  localToSpecifier: Map<string, string>;
+}> {
+  // Create a temporary entry file that imports all user files so we can
+  // resolve the complete dependency graph in a single `deno info` call.
+  const tmpFileName = ".deblock_resolve_tmp.ts";
+  const tmpPath = path.join(projectDir, tmpFileName);
+  const imports = files.map((f) => {
+    const rel = f.startsWith("/") ? path.relative(projectDir, f) : f;
+    return `import "./${rel}";`;
+  }).join("\n");
 
-  // Try the deno.json import map
-  for (const [key, value] of Object.entries(importMap)) {
-    if (moduleName === key || moduleName.startsWith(key + "/")) {
-      const suffix = moduleName === key ? "" : moduleName.slice(key.length);
-      if (value.startsWith("jsr:")) {
-        return resolveJsrToVendor(value + suffix, vendorIndex);
+  await Deno.writeTextFile(tmpPath, imports);
+
+  try {
+    const proc = new Deno.Command("deno", {
+      args: ["info", "--json", tmpPath],
+      cwd: projectDir,
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const output = await proc.output();
+
+    if (!output.success) {
+      const stderr = new TextDecoder().decode(output.stderr);
+      console.error(
+        yellow("Warning: failed to resolve dependencies via deno info:"),
+        stderr,
+      );
+      return { fileResolutions: new Map(), localToSpecifier: new Map() };
+    }
+
+    const info: DenoInfoOutput = JSON.parse(
+      new TextDecoder().decode(output.stdout),
+    );
+
+    // specifier → local path
+    const specToLocal = new Map<string, string>();
+    // local path → specifier (for pretty-printing)
+    const localToSpecifier = new Map<string, string>();
+
+    for (const mod of info.modules) {
+      if (mod.local) {
+        specToLocal.set(mod.specifier, mod.local);
+        localToSpecifier.set(mod.local, mod.specifier);
       }
     }
-  }
 
-  return null;
+    // redirects: jsr:@scope/pkg@ver/sub → https://jsr.io/…
+    const redirectToTarget = new Map<string, string>();
+    for (const [from, to] of Object.entries(info.redirects ?? {})) {
+      redirectToTarget.set(from, to);
+    }
+
+    // Per-file resolution: local path → Map of (raw import → resolved local path)
+    const fileResolutions = new Map<string, Map<string, string>>();
+
+    for (const mod of info.modules) {
+      if (!mod.local || !mod.dependencies) continue;
+      const deps = new Map<string, string>();
+
+      for (const dep of mod.dependencies) {
+        const resolvedSpec = dep.code?.specifier ?? dep.type?.specifier;
+        if (!resolvedSpec) continue;
+
+        // Direct lookup
+        let localPath = specToLocal.get(resolvedSpec);
+
+        // Try via redirect chain
+        if (!localPath) {
+          const redirected = redirectToTarget.get(resolvedSpec);
+          if (redirected) {
+            localPath = specToLocal.get(redirected);
+          }
+        }
+
+        if (localPath) {
+          deps.set(dep.specifier, localPath);
+        }
+      }
+
+      if (deps.size > 0) {
+        fileResolutions.set(mod.local, deps);
+      }
+    }
+
+    return { fileResolutions, localToSpecifier };
+  } finally {
+    await Deno.remove(tmpPath).catch(() => {});
+  }
 }
 
-/** Pretty-print a vendor file path as `@scope/pkg/file.ts`. */
-function formatDepPath(filePath: string): string {
+/** Pretty-print a dependency file path as `@scope/pkg/file.ts`. */
+function formatDepPath(
+  filePath: string,
+  localToSpecifier: Map<string, string>,
+): string {
+  // Try the specifier map (works for both global cache and vendor)
+  const specifier = localToSpecifier.get(filePath);
+  if (specifier) {
+    const m = specifier.match(
+      /https:\/\/jsr\.io\/(@[^/]+\/[^/]+)\/[^/]+\/(.*)/,
+    );
+    if (m) return `${m[1]}/${m[2]}`;
+    return specifier;
+  }
+  // Fallback: vendor path format
   const m = filePath.match(/\/vendor\/jsr\.io\/(@[^/]+\/[^/]+)\/[^/]+\/(.*)/);
   if (m) return `${m[1]}/${m[2]}`;
   return filePath;
 }
 
 // ---------------------------------------------------------------------------
-// Set up the project with vendor-aware resolution
+// Set up the project
 // ---------------------------------------------------------------------------
 
 const projectDir = Deno.cwd();
-const vendorDir = path.join(projectDir, "vendor");
+const files = await getFiles();
+if (files.length === 0) {
+  console.log(yellow("No files found to check."));
+  Deno.exit(0);
+}
 
-const [vendorIndex, importMap] = await Promise.all([
-  buildVendorIndex(vendorDir),
-  loadImportMap(projectDir),
-]);
+// Resolve all dependencies via `deno info` (works with global cache or vendor)
+console.log(gray("Resolving dependencies…"));
+const { fileResolutions, localToSpecifier } = await buildResolutionFromDenoInfo(
+  projectDir,
+  files,
+);
 
 const project = new Project({
   resolutionHost: (moduleResolutionHost, getCompilerOptions) => ({
@@ -206,22 +218,21 @@ const project = new Project({
       const compilerOptions = getCompilerOptions();
 
       return moduleNames.map((moduleName) => {
-        // 1. Try vendor / import-map resolution
-        const vendorPath = resolveModuleSpecifier(
-          moduleName,
-          importMap,
-          vendorIndex,
-        );
-        if (vendorPath) {
-          try {
-            Deno.statSync(vendorPath); // verify it exists
-            return {
-              resolvedFileName: vendorPath,
-              isExternalLibraryImport: true,
-              extension: vendorPath.endsWith(".js") ? ".js" : ".ts",
-            } as ts.ResolvedModuleFull;
-          } catch {
-            /* file not found – fall through to default resolution */
+        // 1. Try deno info resolution (handles JSR, import maps, internal deps)
+        const fileRes = fileResolutions.get(containingFile);
+        if (fileRes) {
+          const resolvedPath = fileRes.get(moduleName);
+          if (resolvedPath) {
+            try {
+              Deno.statSync(resolvedPath);
+              return {
+                resolvedFileName: resolvedPath,
+                isExternalLibraryImport: true,
+                extension: resolvedPath.endsWith(".js") ? ".js" : ".ts",
+              } as ts.ResolvedModuleFull;
+            } catch {
+              /* file not found – fall through */
+            }
           }
         }
 
@@ -240,12 +251,6 @@ const project = new Project({
     },
   }),
 });
-
-const files = await getFiles();
-if (files.length === 0) {
-  console.log(yellow("No files found to check."));
-  Deno.exit(0);
-}
 
 // Keep track of which files are the user's (not dependencies)
 const userFilePaths = new Set<string>(
@@ -433,7 +438,9 @@ for (const func of allFunctions) {
         reason: "native",
         callText: native,
         rootCause: native,
-        rootSource: `${formatDepPath(sf.getFilePath())}:${lc.line}`,
+        rootSource: `${
+          formatDepPath(sf.getFilePath(), localToSpecifier)
+        }:${lc.line}`,
       });
       break;
     }

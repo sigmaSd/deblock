@@ -15,9 +15,10 @@ It detects:
   `Deno.statSync`, etc.
 - **Node.js builtin sync APIs** — `readFileSync`, `execSync`, `spawnSync`, etc.
   from `node:fs`, `node:child_process`, `node:crypto`.
-- **Blocking JSR dependencies** — traces through vendored JSR dependency source
-  code to find transitive blocking calls (e.g. `walkSync` from `@std/fs`
-  internally calls `Deno.readDirSync`).
+- **Blocking JSR dependencies** — traces through JSR dependency source code to
+  find transitive blocking calls (e.g. `walkSync` from `@std/fs` internally
+  calls `Deno.readDirSync`). Dependencies are resolved automatically from Deno's
+  global cache.
 - **Propagation** — if a sync function calls a blocker, and that sync function
   is called from an async function, it's reported with the full root cause
   chain.
@@ -86,27 +87,18 @@ ERROR src/utils.ts:18:10
 
 ## JSR dependency tracing
 
-For JSR dependency detection to work, `"vendor": true` must be set in your
-`deno.json`. This makes Deno download dependency source files into the `vendor/`
-directory, which `deblock` can then analyze.
-
-```jsonc
-// deno.json
-{
-  "vendor": true
-}
-```
-
-Then run `deno install` (or any `deno` command) to populate the vendor
-directory, and run `deblock`.
+JSR dependency detection works automatically. `deblock` runs `deno info --json`
+internally to resolve all dependencies to their cached source files (in Deno's
+global cache or a local `vendor/` directory). No special configuration is needed
+— just make sure your dependencies are listed in `deno.json`.
 
 ## How it works
 
-1. **Parse** — loads source files into a ts-morph `Project` with a custom
-   resolution host that resolves `jsr:` specifiers and import map entries to
-   vendored source files.
-2. **Resolve dependencies** — calls `resolveSourceFileDependencies()` to pull in
-   transitive JSR dependency source files.
+1. **Resolve dependencies** — runs `deno info --json` on user files to build a
+   complete module graph mapping every import specifier to its local cached file
+   path (works with both the global DENO_DIR cache and vendored dependencies).
+2. **Parse** — loads source files into a ts-morph `Project` with a custom
+   resolution host that uses the `deno info` module graph for resolution.
 3. **Collect functions** — gathers all function-like declarations (functions,
    arrow functions, methods, constructors, accessors).
 4. **Detect native blockers** — marks any function that directly calls a
