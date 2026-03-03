@@ -12,12 +12,15 @@ import {
 } from "ts-morph";
 
 const parsed = parseArgs(Deno.args, {
-  boolean: ["help"],
+  boolean: ["help", "no-deps", "all"],
   string: ["exclude"],
   collect: ["exclude"],
   alias: { h: "help", e: "exclude" },
-  default: { help: false, exclude: [] },
+  default: { help: false, exclude: [], "no-deps": false, all: false },
 });
+
+const noDeps = parsed["no-deps"] as boolean;
+const reportAll = parsed["all"] as boolean;
 
 if (parsed.help) {
   console.log(`
@@ -27,6 +30,8 @@ Looks for blocking Deno APIs inside asynchronous functions.
 
 ${bold("Options:")}
   -e, --exclude <pattern>    Exclude files matching the glob pattern.
+      --no-deps              Skip dependency scanning for a faster check.
+      --all                  Also report issues found in dependencies.
   -h, --help                 Show this help message.
   `);
   Deno.exit(0);
@@ -206,11 +211,17 @@ if (files.length === 0) {
 }
 
 // Resolve all dependencies via `deno info` (works with global cache or vendor)
-console.log(gray("Resolving dependencies…"));
-const { fileResolutions, localToSpecifier } = await buildResolutionFromDenoInfo(
-  projectDir,
-  files,
-);
+let fileResolutions = new Map<string, Map<string, string>>();
+let localToSpecifier = new Map<string, string>();
+
+if (!noDeps) {
+  console.log(gray("Resolving dependencies…"));
+  const resolved = await buildResolutionFromDenoInfo(projectDir, files);
+  fileResolutions = resolved.fileResolutions;
+  localToSpecifier = resolved.localToSpecifier;
+} else {
+  console.log(gray("Skipping dependency resolution (--no-deps)."));
+}
 
 const project = new Project({
   resolutionHost: (moduleResolutionHost, getCompilerOptions) => ({
@@ -263,11 +274,13 @@ for (const file of files) {
 }
 
 // Pull in dependency source files so the analysis can trace through them
-const resolvedDeps = project.resolveSourceFileDependencies();
-if (resolvedDeps.length > 0) {
-  console.log(
-    gray(`Resolved ${resolvedDeps.length} dependency source file(s).`),
-  );
+if (!noDeps) {
+  const resolvedDeps = project.resolveSourceFileDependencies();
+  if (resolvedDeps.length > 0) {
+    console.log(
+      gray(`Resolved ${resolvedDeps.length} dependency source file(s).`),
+    );
+  }
 }
 
 const allFunctions: (Node & FunctionLikeDeclaration)[] = [];
@@ -502,9 +515,9 @@ let foundIssues = false;
 for (const func of allFunctions) {
   if (!isAsyncFunction(func)) continue;
 
-  // Only report for user files, not dependencies
+  // Only report for user files unless --all is set
   const sfPath = func.getSourceFile().getFilePath();
-  if (!userFilePaths.has(sfPath)) continue;
+  if (!reportAll && !userFilePaths.has(sfPath)) continue;
 
   const calls = func.getDescendantsOfKind(SyntaxKind.CallExpression);
   for (const call of calls) {

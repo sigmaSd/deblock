@@ -46,6 +46,8 @@ Looks for blocking Deno APIs inside asynchronous functions.
 
 Options:
   -e, --exclude <pattern>    Exclude files matching the glob pattern.
+      --no-deps              Skip dependency scanning for a faster check.
+      --all                  Also report issues found in dependencies.
   -h, --help                 Show this help message.
 ```
 
@@ -69,6 +71,26 @@ deblock src/server.ts src/handlers.ts
 ```sh
 deblock -e "**/*_test.ts" -e "scripts/**"
 ```
+
+### Quick scan (skip dependencies)
+
+```sh
+deblock --no-deps
+```
+
+Skips the `deno info` resolution step and dependency source loading entirely.
+Still catches direct sync API calls and propagation within your own code, but
+won't trace through imported libraries. Useful for a fast feedback loop during
+development.
+
+### Report issues in dependencies too
+
+```sh
+deblock --all
+```
+
+By default only issues in your code are reported. `--all` also reports blocking
+calls found inside dependency source files.
 
 ## Example output
 
@@ -101,6 +123,21 @@ import { walkSync } from "@std/fs/walk";
 // Also works: inline jsr: specifier (no deno.json entry needed)
 import { loadSync } from "jsr:@std/dotenv@0";
 ```
+
+## Why npm dependencies are not scanned
+
+Dependency tracing currently works with **JSR packages only**. npm packages are
+not scanned because:
+
+- Most npm packages ship compiled `.js` bundles alongside `.d.ts` type
+  declarations. The type declarations contain only signatures — no function
+  bodies — so there is nothing to trace through.
+- Many npm packages publish minified or bundled code where variable names are
+  mangled and call chains are inlined, making static analysis unreliable.
+- CommonJS (`require()`) patterns are harder to follow than ESM imports.
+
+This is one of JSR's advantages: packages publish TypeScript source directly, so
+tools like `deblock` can analyze the full call graph.
 
 ## How it works
 
