@@ -33,7 +33,7 @@ deno run -A jsr:@sigmasd/deblock
 Or install it as a tool:
 
 ```sh
-deno install -A -n deblock jsr:@sigmasd/deblock
+deno install -gA jsr:@sigmasd/deblock
 deblock
 ```
 
