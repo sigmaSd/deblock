@@ -7,10 +7,11 @@ const FIXTURES = path.join(import.meta.dirname!, "fixtures");
 /** Run deblock on a fixture file and return { code, stdout, stderr }. */
 async function run(
   fixture: string,
+  extraArgs: string[] = [],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const filePath = path.join(FIXTURES, fixture);
   const cmd = new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", MAIN, filePath],
+    args: ["run", "-A", MAIN, ...extraArgs, filePath],
     stdout: "piped",
     stderr: "piped",
   });
@@ -97,4 +98,52 @@ Deno.test("propagates blocking through arrow functions assigned to variables", a
   assertEquals(code, 1);
   assert(stdout.includes("processData"), stdout);
   assert(stdout.includes("Deno.readTextFileSync"), stdout);
+});
+
+// ---------------------------------------------------------------------------
+// --fix flag
+// ---------------------------------------------------------------------------
+
+Deno.test("--fix converts Deno.*Sync to await async equivalents", async () => {
+  // Work on a temp copy so the fixture is not modified
+  const src = path.join(FIXTURES, "deno_sync.ts");
+  const tmp = await Deno.makeTempFile({ suffix: ".ts" });
+  await Deno.copyFile(src, tmp);
+
+  try {
+    const cmd = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", MAIN, "--fix", tmp],
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const output = await cmd.output();
+    const stdout = new TextDecoder().decode(output.stdout);
+
+    // Should exit 0 after fixing
+    assertEquals(output.code, 0, stdout);
+    assert(stdout.includes("Fixed 3 issue(s)"), stdout);
+
+    // Read back the fixed file
+    const fixed = await Deno.readTextFile(tmp);
+    assert(fixed.includes("await Deno.readTextFile("), fixed);
+    assert(fixed.includes("await Deno.writeTextFile("), fixed);
+    assert(fixed.includes("await Deno.stat("), fixed);
+    // Sync variants should be gone
+    assert(!fixed.includes("readTextFileSync"), fixed);
+    assert(!fixed.includes("writeTextFileSync"), fixed);
+    assert(!fixed.includes("statSync"), fixed);
+
+    // Re-run deblock on the fixed file — should be clean
+    const cmd2 = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", MAIN, tmp],
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const output2 = await cmd2.output();
+    const stdout2 = new TextDecoder().decode(output2.stdout);
+    assertEquals(output2.code, 0, stdout2);
+    assert(stdout2.includes("No blocking calls found"), stdout2);
+  } finally {
+    await Deno.remove(tmp);
+  }
 });

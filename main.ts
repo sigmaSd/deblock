@@ -12,15 +12,22 @@ import {
 } from "ts-morph";
 
 const parsed = parseArgs(Deno.args, {
-  boolean: ["help", "no-deps", "all"],
+  boolean: ["help", "no-deps", "all", "fix"],
   string: ["exclude"],
   collect: ["exclude"],
   alias: { h: "help", e: "exclude" },
-  default: { help: false, exclude: [], "no-deps": false, all: false },
+  default: {
+    help: false,
+    exclude: [],
+    "no-deps": false,
+    all: false,
+    fix: false,
+  },
 });
 
 const noDeps = parsed["no-deps"] as boolean;
 const reportAll = parsed["all"] as boolean;
+const fixMode = parsed["fix"] as boolean;
 
 if (parsed.help) {
   console.log(`
@@ -32,6 +39,7 @@ ${bold("Options:")}
   -e, --exclude <pattern>    Exclude files matching the glob pattern.
       --no-deps              Skip dependency scanning for a faster check.
       --all                  Also report issues found in dependencies.
+      --fix                  Auto-fix direct Deno.*Sync calls in async functions.
   -h, --help                 Show this help message.
   `);
   Deno.exit(0);
@@ -385,6 +393,39 @@ const NODE_SYNC_NAMES = new Set([
   "pbkdf2Sync",
 ]);
 
+/**
+ * Map of Deno sync API names to their async equivalents.
+ * Only covers APIs where the async version has the same signature minus "Sync".
+ */
+const DENO_SYNC_TO_ASYNC: Record<string, string> = {
+  "Deno.readTextFileSync": "Deno.readTextFile",
+  "Deno.writeTextFileSync": "Deno.writeTextFile",
+  "Deno.readFileSync": "Deno.readFile",
+  "Deno.writeFileSync": "Deno.writeFile",
+  "Deno.statSync": "Deno.stat",
+  "Deno.lstatSync": "Deno.lstat",
+  "Deno.mkdirSync": "Deno.mkdir",
+  "Deno.removeSync": "Deno.remove",
+  "Deno.renameSync": "Deno.rename",
+  "Deno.copyFileSync": "Deno.copyFile",
+  "Deno.readDirSync": "Deno.readDir",
+  "Deno.readLinkSync": "Deno.readLink",
+  "Deno.realPathSync": "Deno.realPath",
+  "Deno.truncateSync": "Deno.truncate",
+  "Deno.symlinkSync": "Deno.symlink",
+  "Deno.linkSync": "Deno.link",
+  "Deno.chmodSync": "Deno.chmod",
+  "Deno.chownSync": "Deno.chown",
+  "Deno.openSync": "Deno.open",
+  "Deno.createSync": "Deno.create",
+  "Deno.makeTempDirSync": "Deno.makeTempDir",
+  "Deno.makeTempFileSync": "Deno.makeTempFile",
+  "Deno.fstatSync": "Deno.fstat",
+  "Deno.ftruncateSync": "Deno.ftruncate",
+  "Deno.fuTimeSync": "Deno.fuTime",
+  "Deno.uTimeSync": "Deno.uTime",
+};
+
 function isNativeSyncBlocker(call: CallExpression): string | null {
   const text = call.getExpression().getText();
 
@@ -510,8 +551,16 @@ while (changed) {
   }
 }
 
-// 3. Report issues – only in user source files
-let foundIssues = false;
+// 3. Report issues and collect fixable calls
+interface FixableCall {
+  call: CallExpression;
+  syncName: string;
+  asyncName: string;
+}
+
+let issueCount = 0;
+let fixableCount = 0;
+const fixableCalls: FixableCall[] = [];
 for (const func of allFunctions) {
   if (!isAsyncFunction(func)) continue;
 
@@ -525,7 +574,21 @@ for (const func of allFunctions) {
     const native = isNativeSyncBlocker(call);
     if (native) {
       report(func, call, native);
-      foundIssues = true;
+      issueCount++;
+      // Deno.*Sync calls in user files are auto-fixable — but only when the
+      // call sits directly inside the async function (not nested in an inner
+      // sync callback like .map(), .forEach(), addEventListener, etc.)
+      if (native.startsWith("Deno.") && userFilePaths.has(sfPath)) {
+        const asyncName = DENO_SYNC_TO_ASYNC[native];
+        // Walk up to the nearest enclosing function-like node
+        const innermost = call.getFirstAncestor((node) =>
+          Node.isFunctionLikeDeclaration(node)
+        );
+        if (asyncName && innermost === func) {
+          fixableCount++;
+          fixableCalls.push({ call, syncName: native, asyncName });
+        }
+      }
       continue;
     }
 
@@ -549,7 +612,7 @@ for (const func of allFunctions) {
               call,
               `${callName} is blocking${detail}`,
             );
-            foundIssues = true;
+            issueCount++;
             break;
           }
         }
@@ -579,9 +642,71 @@ function report(
   console.log("");
 }
 
-if (!foundIssues) {
+if (issueCount === 0) {
   console.log(green(bold("✔ No blocking calls found in async functions.")));
 } else {
-  console.log(red(bold("\n✖ Found blocking calls in async functions.")));
-  Deno.exit(1);
+  // Apply fixes when --fix is set
+  if (fixMode && fixableCalls.length > 0) {
+    // Process fixes in reverse order within each file so that earlier offsets
+    // stay valid when we modify later parts of the text.
+    const byFile = new Map<string, FixableCall[]>();
+    for (const fc of fixableCalls) {
+      const fp = fc.call.getSourceFile().getFilePath();
+      if (!byFile.has(fp)) byFile.set(fp, []);
+      byFile.get(fp)!.push(fc);
+    }
+
+    let fixedCount = 0;
+    for (const [filePath, calls] of byFile) {
+      // Sort by start position descending so replacements don't shift offsets
+      calls.sort((a, b) => b.call.getStart() - a.call.getStart());
+
+      let source = await Deno.readTextFile(filePath);
+      for (const { call, asyncName } of calls) {
+        const callStart = call.getStart();
+        const callEnd = call.getEnd();
+        const originalText = source.slice(callStart, callEnd);
+
+        // Replace the sync method name with async in the expression
+        const exprText = call.getExpression().getText();
+        const newCallText = originalText.replace(exprText, asyncName);
+
+        // Check if the call is a standalone expression statement — if so, no
+        // parens needed and we just prepend `await `.
+        const parent = call.getParent();
+        const isStatement = parent && Node.isExpressionStatement(parent);
+        const replacement = isStatement
+          ? `await ${newCallText}`
+          : `(await ${newCallText})`;
+
+        source = source.slice(0, callStart) + replacement +
+          source.slice(callEnd);
+        fixedCount++;
+      }
+      await Deno.writeTextFile(filePath, source);
+    }
+    console.log(
+      green(bold(`\n✔ Fixed ${fixedCount} issue(s).`)) +
+        (issueCount - fixedCount > 0
+          ? gray(
+            ` ${
+              issueCount - fixedCount
+            } remaining issue(s) require manual fixes.`,
+          )
+          : ""),
+    );
+  } else {
+    const fixHint = fixableCount > 0
+      ? gray(` (${fixableCount} auto-fixable with --fix)`)
+      : "";
+    console.log(
+      red(
+        bold(
+          `\n✖ Found ${issueCount} blocking call(s) in async functions.`,
+        ),
+      ) +
+        fixHint,
+    );
+  }
+  Deno.exit(fixMode && fixableCalls.length > 0 ? 0 : 1);
 }
