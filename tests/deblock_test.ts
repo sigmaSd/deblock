@@ -91,3 +91,10 @@ Deno.test("propagates blocking through sync function chain", async () => {
   // Root cause should trace back to Deno.readTextFileSync
   assert(stdout.includes("Deno.readTextFileSync"), stdout);
 });
+
+Deno.test("propagates blocking through arrow functions assigned to variables", async () => {
+  const { code, stdout } = await run("arrow_propagation.ts");
+  assertEquals(code, 1);
+  assert(stdout.includes("processData"), stdout);
+  assert(stdout.includes("Deno.readTextFileSync"), stdout);
+});

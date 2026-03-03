@@ -412,6 +412,22 @@ function getOriginalDeclarations(
   return resolved.getDeclarations();
 }
 
+/**
+ * Given a declaration node, return the FunctionLikeDeclaration it represents.
+ * Handles both direct function declarations and variable declarations whose
+ * initializer is a function expression / arrow function.
+ */
+function getFunctionFromDecl(
+  decl: Node,
+): (Node & FunctionLikeDeclaration) | undefined {
+  if (Node.isFunctionLikeDeclaration(decl)) return decl;
+  if (Node.isVariableDeclaration(decl)) {
+    const init = decl.getInitializer();
+    if (init && Node.isFunctionLikeDeclaration(init)) return init;
+  }
+  return undefined;
+}
+
 interface BlockingInfo {
   reason: "native" | "calls_blocking";
   callText: string;
@@ -461,8 +477,9 @@ while (changed) {
       if (!symbol) continue;
       const declarations = getOriginalDeclarations(symbol);
       for (const decl of declarations) {
-        if (Node.isFunctionLikeDeclaration(decl)) {
-          const calleeBlocking = blockingFunctions.get(decl);
+        const fn = getFunctionFromDecl(decl);
+        if (fn) {
+          const calleeBlocking = blockingFunctions.get(fn);
           if (calleeBlocking) {
             blockingFunctions.set(func, {
               reason: "calls_blocking",
@@ -504,8 +521,9 @@ for (const func of allFunctions) {
     if (symbol) {
       const declarations = getOriginalDeclarations(symbol);
       for (const decl of declarations) {
-        if (Node.isFunctionLikeDeclaration(decl)) {
-          const blocker = blockingFunctions.get(decl);
+        const fn = getFunctionFromDecl(decl);
+        if (fn) {
+          const blocker = blockingFunctions.get(fn);
           if (blocker) {
             const callName = call.getExpression().getText();
             const detail = blocker.rootCause !== callName
